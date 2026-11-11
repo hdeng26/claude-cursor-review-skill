@@ -1,84 +1,85 @@
 ---
 name: cursor
-description: 让 Cursor 在沙盒里只读审查当前 git 仓库的改动（比如 Codex 刚做完的），只在用户输入 /cursor 时运行。
+description: Have Cursor do a sandboxed, read-only review of the current git repository's changes (for example, what Codex just did). Runs only when the user types /cursor.
 disable-model-invocation: true
-argument-hint: "[--dir 路径] [--full] [--repo] [--task ID | --base REF] [审查重点…]"
+argument-hint: "[--dir PATH] [--full] [--repo] [--task ID | --base REF] [review focus...]"
 allowed-tools: Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/cursor_review.py *) Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/transcript_excerpt.py *)
 ---
 
-# /cursor：一次外部只读审查
+# /cursor: one external read-only review
 
-用户的参数：`$ARGUMENTS`
+User arguments: `$ARGUMENTS`
 
-这个命令只做一件事：调用一次 `cursor_review.py`，把结果如实汇报给用户。
-不修复问题，不重试，不合并，不调用 Codex，也不顺手做别的事。
+This command does one thing: run `cursor_review.py` once and report the result to the user faithfully.
+Do not fix problems, retry, merge, call Codex, or do anything else along the way.
+Talk to the user in the language they use with you.
 
-脚本在 `${CLAUDE_SKILL_DIR}/scripts/`。
+The scripts are in `${CLAUDE_SKILL_DIR}/scripts/`.
 
-## 1. 解析参数
+## 1. Parse the arguments
 
-- `--dir 路径`：要审的仓库或 git worktree 所在目录，比如另一个 session 的 worktree。下面写作 `<DIR>`；没给就是当前目录
-- `--full`：附带精简过的对话记录（只有你和用户的文字）
-- `--repo`：附带整个仓库的只读快照（`--scope repo`），适合需要上下文才看得懂的改动
-- `--task ID`：审 `runs/ID/` 记录的委派任务（需要仓库里有委派脚本生成的 `runs/ID/meta.json`，见 README）
-- `--base REF`：指定比较的起点
-- 其余文字都是审查重点，原样放进 `--focus`
+- `--dir PATH`: directory of the repository or git worktree to review, for example another session's worktree. Written `<DIR>` below; defaults to the current directory
+- `--full`: attach a condensed conversation transcript (only the text written by you and the user)
+- `--repo`: attach a read-only snapshot of the whole repository (`--scope repo`), for changes that need context to understand
+- `--task ID`: review the delegated task recorded in `runs/ID/` (needs a `runs/ID/meta.json` produced by a delegation script; see the README)
+- `--base REF`: the starting point to compare against
+- Any remaining text is the review focus; pass it verbatim to `--focus`
 
-## 2. 决定审什么
+## 2. Decide what to review
 
-下面所有 git 命令都写成 `git -C <DIR> …`。先运行 `git -C <DIR> rev-parse --show-toplevel`：
-失败就告诉用户 `<DIR>` 不是 git 仓库（`/cursor` 需要在 git 仓库里用，或者用 `--dir` 指一个仓库），然后停止。
+Write every git command below as `git -C <DIR> ...`. First run `git -C <DIR> rev-parse --show-toplevel`.
+If it fails, tell the user that `<DIR>` is not a git repository (`/cursor` must be used inside a git repository, or pointed at one with `--dir`), then stop.
 
-按顺序选第一个适用的：
+Pick the first that applies:
 
-1. 有 `--task ID` → `--task ID`
-2. 运行 `git -C <DIR> status --porcelain -- . ':(exclude)runs'`，有输出（有未提交的改动，比如 Codex 插件刚改完）→ `--base <REF 或 HEAD> --worktree`（这里的 worktree 指「工作区」，不是 git worktree）
-3. 工作区干净 → `--base <REF 或 HEAD~1>`（审最近一次提交）
+1. `--task ID` given → `--task ID`
+2. Run `git -C <DIR> status --porcelain -- . ':(exclude)runs'`. If it prints anything (there are uncommitted changes, for example from the Codex plugin) → `--base <REF or HEAD> --worktree` (here "worktree" means the working tree, not a git worktree)
+3. Clean working tree → `--base <REF or HEAD~1>` (review the latest commit)
 
-在汇报里写明你选了哪一种、为什么。
+Say in your report which one you picked and why.
 
-## 3. 写背景说明
+## 3. Write the context brief
 
-先运行 `git -C <DIR> rev-parse --absolute-git-dir` 得到 `<GITDIR>`，把背景写到 `<GITDIR>/cursor-reviews/context-${CLAUDE_SESSION_ID}.md`（在 `.git` 里面，不进版本库，也不进 diff）。内容：
+Run `git -C <DIR> rev-parse --absolute-git-dir` to get `<GITDIR>`, and write the brief to `<GITDIR>/cursor-reviews/context-${CLAUDE_SESSION_ID}.md` (inside `.git`, so it never enters version control or the diff). Contents:
 
-- 用户想要什么：尽量引用用户在对话里的原话
-- 交给实现者（Codex 或别人）的具体要求，以及对话里定下的约束：只能改哪些文件、不能动什么、风格要求
-- 你知道的风险点或用户担心的地方
+- What the user wants: quote the user's own words from the conversation where possible
+- The concrete requirements given to the implementer (Codex or anyone else), and constraints agreed in the conversation: which files may change, what must not be touched, style requirements
+- Risks you know of, or things the user is worried about
 
-只写和这次改动有关的内容，一般不超过一页。不要写密钥、密码、token。
-不要在这里下结论说改动是对的：这是给审查者的背景，不是你的审查意见。
+Only include what is relevant to this change; usually no more than a page. Never include keys, passwords or tokens.
+Do not conclude here that the change is correct: this is background for the reviewer, not your review.
 
-## 4. （仅 `--full`）生成对话摘录
+## 4. (`--full` only) Create the conversation excerpt
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/transcript_excerpt.py --session ${CLAUDE_SESSION_ID} -o <GITDIR>/cursor-reviews/transcript-${CLAUDE_SESSION_ID}.md
 ```
 
-## 5. 运行审查
+## 5. Run the review
 
 ```bash
-python3 ${CLAUDE_SKILL_DIR}/scripts/cursor_review.py --dir <DIR> <第 2 步选的参数> [--scope repo] \
+python3 ${CLAUDE_SKILL_DIR}/scripts/cursor_review.py --dir <DIR> <arguments from step 2> [--scope repo] \
   --context <GITDIR>/cursor-reviews/context-${CLAUDE_SESSION_ID}.md \
   [--context <GITDIR>/cursor-reviews/transcript-${CLAUDE_SESSION_ID}.md] \
-  [--focus "<审查重点>"] [--timeout 600]
+  [--focus "<review focus>"] [--timeout 600]
 ```
 
-- `--repo` 或 `--full` 时加 `--timeout 600`，Bash 超时设为 660000 ms
-- 退出码：0 = PASS，1 = FAIL 或 UNCLEAR，3 = 审查本身失败。三种都不重跑
-- 不加 `CURSOR_ISOLATION=none`。沙盒失败就报告失败，让用户决定
+- With `--repo` or `--full`, add `--timeout 600` and set the Bash timeout to 660000 ms
+- Exit codes: 0 = PASS, 1 = FAIL or UNCLEAR, 3 = the review itself failed. Never rerun in any of these cases
+- Never add `CURSOR_ISOLATION=none`. If the sandbox fails, report the failure and let the user decide
 
-## 6. 汇报
+## 6. Report
 
-读输出里给出的 `review_cursor.md`，以及同目录的 `review_cursor.json`（失败时看其中的 `error` 和 `stderr`），然后按这个格式汇报：
+Read the `review_cursor.md` named in the output, and `review_cursor.json` in the same directory (on failure, look at its `error` and `stderr`), then report in this format:
 
 ```
-cursor review: PASS / FAIL / UNCLEAR / 失败(<error>)
-审的仓库: <DIR 对应的仓库根目录>（git worktree 的话注明分支）
-审的范围: <base>..<HEAD 或 工作区>，scope=<diff|repo>，背景: <context 文件>
-确定的问题: 每条带 文件:行号
-怀疑: …
-记录: <review_cursor.md 路径>
+cursor review: PASS / FAIL / UNCLEAR / failed (<error>)
+repository: <repository root for DIR> (for a git worktree, also give the branch)
+range: <base>..<HEAD or working tree>, scope=<diff|repo>, context: <context files>
+definite problems: each with file:line
+suspicions: ...
+record: <path to review_cursor.md>
 ```
 
-最后可以用一两句话说你是否同意 Cursor 的结论，并注明这是你的看法。
-不要改动审查记录。
+You may finish with one or two sentences on whether you agree with Cursor's conclusion, marked as your own view.
+Do not modify the review record.

@@ -1,135 +1,134 @@
-# /cursor — 让 Cursor 在沙盒里只读审查你的改动
+# Cursor Review Skill for Claude Code
 
-一个 [Claude Code](https://docs.claude.com/en/docs/claude-code) 全局 skill。在任何 git 仓库的本地 session 里输入 `/cursor`，Claude 会把当前的改动（比如 Codex 刚做完的）交给 [Cursor CLI](https://cursor.com/cli) 做一次独立的只读审查，再把结论汇报给你。
+A global [Claude Code](https://docs.claude.com/en/docs/claude-code) skill. Type `/cursor` in a local session inside any git repository. Claude then hands your current changes (for example, what Codex just did) to the [Cursor CLI](https://cursor.com/cli) for an independent read-only review, and reports what it found.
 
-*English summary: a Claude Code skill that sends your current git changes to the Cursor CLI for one read-only review inside a bubblewrap sandbox, together with a context brief Claude writes from the conversation. Manual only (`/cursor`), Linux only, no retries, nothing modified.*
+## Why
 
-## 为什么需要它
+- **A second pair of eyes.** Whoever made the change (Codex, Claude or you) tends to miss its problems. A different model reading the diff catches more.
+- **Cursor can't see your conversation.** So Claude first writes a context brief: your own words, the constraints given to the implementer, and known risks. The brief goes to Cursor along with the diff. With `--full`, a condensed transcript is attached too.
+- **Manual only.** The skill sets `disable-model-invocation: true`, so it runs only when you type `/cursor`. Claude never invokes it on its own.
+- **Read-only and isolated.** Cursor runs in Ask mode inside a bubblewrap sandbox, and can't see the rest of your home directory.
 
-- **第二双眼睛**：实现的人（Codex、Claude 或你自己）容易对自己的改动视而不见，另一个模型看 diff 更容易发现问题。
-- **Cursor 看不到你们的对话**：所以 Claude 先写一份背景说明（你的原话、交给实现者的约束、风险点），和 diff 一起交给 Cursor。加 `--full` 还能附上精简过的对话记录。
-- **手动触发**：skill 设置了 `disable-model-invocation: true`，只有你输入 `/cursor` 才会运行，Claude 不会自己调用。
-- **只读、隔离**：Cursor 用 Ask 模式运行，并且套在 bubblewrap 沙盒里，看不到你 home 目录的其他内容。
+## Install
 
-## 安装
+Requirements:
 
-依赖：
-
-- Linux，装好 [bubblewrap](https://github.com/containers/bubblewrap)：`sudo apt install bubblewrap`
-- [Cursor CLI](https://cursor.com/cli)（命令 `agent`），并且已经登录：`agent login`
-- Python 3.9+（只用标准库）
+- Linux with [bubblewrap](https://github.com/containers/bubblewrap): `sudo apt install bubblewrap`
+- [Cursor CLI](https://cursor.com/cli) (the `agent` command), logged in: `agent login`
+- Python 3.9+ (standard library only)
 - Claude Code
 
-装成全局 skill：
+Install as a global skill:
 
 ```bash
-git clone https://github.com/hdeng26/claude-cursor-review ~/.claude/skills/cursor
+git clone https://github.com/hdeng26/claude-cursor-review-skill ~/.claude/skills/cursor
 ```
 
-更新：
+Update:
 
 ```bash
 git -C ~/.claude/skills/cursor pull
 ```
 
-只想在某个项目里用的话，克隆到那个项目的 `.claude/skills/cursor` 就行。
+To use it in a single project only, clone it into that project's `.claude/skills/cursor` instead.
 
-## 用法
+## Usage
 
-在 Claude Code 的本地 session 里：
+In a local Claude Code session:
 
 ```
-/cursor                          审未提交的改动；工作区干净时审最近一次提交
-/cursor 重点看图例和数字           命令后面的文字是审查重点
-/cursor --repo                   另外给 Cursor 一份整个仓库的只读快照
-/cursor --full                   另外附带精简过的对话记录（只有你和 Claude 的文字）
-/cursor --base main              审 main..HEAD（有未提交改动时审到工作区）
-/cursor --dir <路径>              审另一个目录里的仓库或 git worktree（比如另一个 session 的）
-/cursor --task T005              审委派脚本跑过的任务，见下文
+/cursor                          review uncommitted changes; with a clean working tree, the latest commit
+/cursor check the legend and numbers   any text after the command is the review focus
+/cursor --repo                   also give Cursor a read-only snapshot of the whole repository
+/cursor --full                   also attach a condensed transcript (only your text and Claude's)
+/cursor --base main              review main..HEAD (up to the working tree if there are uncommitted changes)
+/cursor --dir <path>             review a repository or git worktree in another directory (e.g. another session's)
+/cursor --task T005              review a delegated task, see below
 ```
 
-参数可以组合，比如 `/cursor --dir ../other --repo 重点看数据划分`。
+Arguments can be combined, e.g. `/cursor --dir ../other --repo focus on the data split`.
 
-Claude 会：
+Claude will:
 
-1. 决定审什么范围（并告诉你为什么）
-2. 把背景说明写到 `<git-dir>/cursor-reviews/context-<session>.md`
-3. 运行一次 `scripts/cursor_review.py`
-4. 按固定格式汇报：PASS / FAIL / UNCLEAR、审的范围、带 `文件:行号` 的问题、怀疑点、记录路径
+1. Decide what range to review, and tell you why
+2. Write the context brief to `<git-dir>/cursor-reviews/context-<session>.md`
+3. Run `scripts/cursor_review.py` once
+4. Report in a fixed format: PASS / FAIL / UNCLEAR, the range reviewed, problems with `file:line`, suspicions, and the record path
 
-结果写在 `.git/cursor-reviews/<时间>/review_cursor.md`（以及 `review_cursor.json`）。放在 `.git` 里面，所以不进版本库、不进 diff，也不用改 `.gitignore`。
+Results go to `.git/cursor-reviews/<timestamp>/review_cursor.md` (plus `review_cursor.json`). Because this is inside `.git`, nothing gets committed, nothing shows up in the diff, and no `.gitignore` change is needed.
 
-它**不会**修复问题、重试、合并或调用其他 agent。审查失败就如实报告失败。
+It does **not** fix problems, retry, merge, or call other agents. If the review fails, it reports the failure as-is.
 
-## 直接用脚本
+## Using the script directly
 
-`/cursor` 背后就是这个脚本，也可以单独运行：
+`/cursor` is a thin wrapper around this script, which you can also run yourself:
 
 ```bash
 S=~/.claude/skills/cursor/scripts
-python3 $S/cursor_review.py --base HEAD --worktree            # 审未提交的改动
+python3 $S/cursor_review.py --base HEAD --worktree            # review uncommitted changes
 python3 $S/cursor_review.py --base main --scope repo --timeout 600
-python3 $S/cursor_review.py --base HEAD~1 --context notes.md --focus "检查边界条件"
+python3 $S/cursor_review.py --base HEAD~1 --context notes.md --focus "check edge cases"
 python3 $S/transcript_excerpt.py --session <session-id> -o excerpt.md
 ```
 
-| 参数 | 含义 |
+| Option | Meaning |
 |---|---|
-| `--base REF` | 审 `REF..HEAD` |
-| `--worktree` | 审到工作区，含未提交和未跟踪的文件。这里的 worktree 指「工作区」，**不是** git worktree |
-| `--dir PATH` | 要审的仓库所在目录，默认当前目录 |
-| `--scope diff\|repo` | `diff` 只放改动和被改文件；`repo` 另外放整个仓库的快照（上限 5000 个文件、30 MB，单文件超过 1 MB 跳过，疑似密钥文件跳过） |
-| `--context FILE` | 附加背景材料，可重复，单个上限 1 MB |
-| `--focus TEXT` | 追加的审查重点 |
-| `--kind review\|audit` | `audit` 核对「声称做了」和「实际做了」是否一致，需要 `--task` |
-| `--model` | Cursor 模型，默认 `auto`，也可用环境变量 `CURSOR_MODEL` |
-| `--timeout` | 秒，默认 300，上限 900 |
-| `--dry-run` | 只准备 workspace，不启动 Cursor，方便检查交给 Cursor 的到底是什么 |
+| `--base REF` | review `REF..HEAD` |
+| `--worktree` | review up to the working tree, including uncommitted and untracked files. "Worktree" here means the working tree, **not** `git worktree` |
+| `--dir PATH` | directory of the repository to review; defaults to the current directory |
+| `--scope diff\|repo` | `diff`: only the change and the changed files. `repo`: also a snapshot of the whole repository (up to 5000 files / 30 MB; files over 1 MB and likely secret files are skipped) |
+| `--context FILE` | extra background material; repeatable, up to 1 MB each |
+| `--focus TEXT` | extra review focus |
+| `--kind review\|audit` | `audit` checks claims against what was actually done; needs `--task` |
+| `--model` | Cursor model; default `auto`, or set `CURSOR_MODEL` |
+| `--timeout` | seconds; default 300, max 900 |
+| `--dry-run` | prepare the workspace without starting Cursor, so you can inspect exactly what Cursor would get |
 
-单次 diff 上限 40 个文件、400 KB。超了会拒绝：改动应该拆小。
+A single diff is limited to 40 files and 400 KB. Anything larger is refused on purpose: split the change up.
 
-退出码：`0` PASS，`1` FAIL 或 UNCLEAR，`3` 审查本身失败。
+Exit codes: `0` PASS, `1` FAIL or UNCLEAR, `3` the review itself failed.
 
-环境变量：`CURSOR_BIN`（默认 `agent`）、`CURSOR_MODEL`、`CURSOR_ISOLATION`（`bwrap` 默认 / `none`）。
+Environment variables: `CURSOR_BIN` (default `agent`), `CURSOR_MODEL`, `CURSOR_ISOLATION` (`bwrap` by default, or `none`).
 
-## 隔离是怎么做的
+## How the isolation works
 
-Cursor 自己的 `--sandbox enabled` 和 `.cursor/sandbox.json` **拦不住** workspace 之外的读取（在 Cursor CLI 2026.11.11 上实测：不隔离时它能读到 `~` 下的文件和 `/etc/hostname`）。所以脚本把 Cursor 套在 bubblewrap 里，沙盒里只有：
+Cursor's own `--sandbox enabled` and `.cursor/sandbox.json` do **not** block reads outside the workspace. Tested on Cursor CLI 2026.11.11: without extra isolation it could read files under `~` and `/etc/hostname`. So the script runs Cursor inside bubblewrap, where it can see only:
 
-- 系统程序目录（只读）和少量 `/etc` 文件
-- Cursor 自己的安装目录 `~/.local/share/cursor-agent`（只读）
-- 登录目录 `~/.config/cursor`
-- 一份临时的 `~/.cursor`，只含 `cli-config.json` 和 `agent-cli-state.json`，不含历史对话
-- 本次审查的临时 workspace（diff、被改文件的副本、背景材料）
+- system program directories (read-only) and a few `/etc` files
+- Cursor's install directory `~/.local/share/cursor-agent` (read-only)
+- its login directory `~/.config/cursor`
+- a throwaway `~/.cursor` containing only `cli-config.json` and `agent-cli-state.json`, with no chat history
+- the temporary workspace for this review (diff, copies of changed files, context material)
 
-实测：沙盒里读 `~` 和 `~/.cursor` 里的测试文件、`/etc/hostname` 都返回 File not found，登录照常可用。
+Tested: inside the sandbox, reading test files in `~` and `~/.cursor`, and `/etc/hostname`, all return "File not found", and login still works.
 
-`CURSOR_ISOLATION=none` 会关掉隔离，Cursor 能读你的整个 home 目录。`/cursor` 永远不会用它，只适合你自己排查问题。
+`CURSOR_ISOLATION=none` turns isolation off, which lets Cursor read your whole home directory. `/cursor` never uses it; it's only for your own debugging.
 
-**它挡不住的**：Cursor 仍然联网（它要调用自己的模型服务），所以交进 workspace 的代码和背景材料会发给 Cursor。不要拿它审你不愿意发给 Cursor 的代码。
+**What it can't stop:** Cursor still has network access (it has to call its own model service), so the code and context placed in the workspace are sent to Cursor. Don't use it on code you aren't willing to send to Cursor.
 
-## `--task` 和 `--kind audit`（可选）
+## `--task` and `--kind audit` (optional)
 
-给「Claude 协调、Codex 实现、Cursor 审查」这类委派流程用的。仓库里需要有：
+These are for delegation workflows such as "Claude coordinates, Codex implements, Cursor reviews". The repository needs:
 
-- `runs/<id>/meta.json`，至少有 `base_sha` 字段
-- 可选：`tasks/<id>.md`（任务说明）、`runs/<id>/summary.md`（实现者的总结）、`runs/<id>/codex.jsonl`（实现者的执行日志）、`runs/<id>/verify.txt`、`runs/<id>/review_claude.md`
+- `runs/<id>/meta.json` with at least a `base_sha` field
+- optionally: `tasks/<id>.md` (task description), `runs/<id>/summary.md` (the implementer's summary), `runs/<id>/codex.jsonl` (the implementer's `codex exec --json` log), `runs/<id>/verify.txt`, `runs/<id>/review_claude.md`
 
-`--task <id>` 审 `base_sha..HEAD`，结果写进 `runs/<id>/` 并提交。`--kind audit` 让 Cursor 对照日志（脚本会从 `codex.jsonl` 提取实际执行过的命令）核对总结里的每一条声称，标出 UNSUPPORTED 或 CONTRADICTED 的。
+`--task <id>` reviews `base_sha..HEAD` and writes the result into `runs/<id>/`, then commits it. `--kind audit` has Cursor check each claim in the summary against the log. The script extracts the commands that were actually run from `codex.jsonl`, and Cursor marks claims UNSUPPORTED or CONTRADICTED.
 
-## 文件
+## Files
 
 ```
-SKILL.md                     skill 本体：Claude 收到 /cursor 后按它执行
-scripts/cursor_review.py     准备 workspace、启动沙盒里的 Cursor、写审查记录
-scripts/transcript_excerpt.py 从 Claude Code 对话记录里提取你和 Claude 的文字（去掉系统提示，粗略打码 token）
+SKILL.md                       the skill itself: what Claude does when you type /cursor
+scripts/cursor_review.py       prepares the workspace, runs Cursor in the sandbox, writes the review record
+scripts/transcript_excerpt.py  extracts your text and Claude's from a Claude Code transcript
+                               (drops system reminders, roughly redacts tokens)
 ```
 
-## 已知限制
+## Known limitations
 
-- 只支持 Linux（bubblewrap）。
-- 背景说明是 Claude 写的，可能漏掉或误解你的意图；`--full` 能缓解，但对话摘录有字数上限（默认 15 万字符，只保留最近的部分）。
-- 一个模型的审查不等于正确性证明。PASS 只说明 Cursor 没发现问题。
+- Linux only (bubblewrap).
+- Claude writes the context brief, so it can miss or misread your intent. `--full` helps, but the excerpt is capped (150,000 characters by default, keeping the most recent part).
+- One model's review is not a proof of correctness. PASS only means Cursor found nothing.
 
 ## License
 
